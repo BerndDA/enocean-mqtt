@@ -189,7 +189,6 @@ func (c *Client) readLoop() {
 			}
 
 			if n > 0 {
-				log.Printf("Received %d bytes: %s", n, hex.EncodeToString(buf[:n]))
 				c.buffer = append(c.buffer, buf[:n]...)
 				c.parseBuffer()
 			}
@@ -262,8 +261,6 @@ func (c *Client) parseBuffer() {
 		}
 
 		telegram.CRC8D = c.buffer[totalLen-1]
-
-		log.Printf("Parsed telegram: Type=%d, DataLen=%d", telegram.PacketType, telegram.DataLength)
 
 		// Route packets based on type
 		switch telegram.PacketType {
