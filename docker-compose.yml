@@ -1,10 +1,20 @@
 services:
+  serial-mux:
+    build: ./tools
+    container_name: serial-mux
+    restart: unless-stopped
+    devices:
+      - /dev/serial/by-id/usb-Prolific_Technology_Inc._USB-Serial_Controller-if00-port0:/dev/ttyUSB0
+    ports:
+      - "2000:2000"
+      - "2001:2001"
+
   enocean-mqtt:
     build: .
     container_name: enocean-mqtt
     restart: unless-stopped
+    depends_on:
+      - serial-mux
     volumes:
       - ./config.yaml:/app/config/config.yaml:ro
-    # No network_mode: host needed - connects via TCP to serial_mux
-    # Adjust if your MQTT broker or serial_mux is on localhost
-    # network_mode: host
+    # Set enocean.host to "serial-mux" in config.yaml when using compose
