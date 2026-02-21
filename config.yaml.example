@@ -1,0 +1,32 @@
+# EnOcean-MQTT Gateway Configuration
+
+enocean:
+  # TCP host running serial_mux.py
+  host: "192.168.1.100"
+  port: 2000
+
+mqtt:
+  host: "192.168.1.100"
+  port: 1883
+  client_id: "enocean-mqtt-gateway"
+  topic: "enocean"  # Base topic prefix
+
+# Device ID to friendly name mapping
+# Device IDs use uppercase hex with colons (e.g., "01:90:B7:27")
+devices:
+  # Example: Eltako switch actuator
+  "01:90:B7:27":
+    name: "kitchen_light"       # Friendly name for MQTT topics
+    type: "actuator"            # Device type (actuator, switch, dimmer)
+    sender_id: "FF:A0:1D:87"    # Sender ID used during teach-in (for commands)
+
+  # Example: Another actuator
+  "01:8B:3A:28":
+    name: "living_room_lamp"
+    type: "actuator"
+    sender_id: "FF:A0:1D:83"
+
+  # Example: Device without sender_id (receive-only)
+  "05:01:7E:43":
+    name: "wall_switch"
+    type: "switch"
