@@ -1,0 +1,10 @@
+services:
+  enocean-mqtt:
+    build: .
+    container_name: enocean-mqtt
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+    # No network_mode: host needed - connects via TCP to serial_mux
+    # Adjust if your MQTT broker or serial_mux is on localhost
+    # network_mode: host
