@@ -58,6 +58,15 @@ type D2_01_MeasurementResponse struct {
 	MeasurementValue uint32          `json:"measurement_value"`
 }
 
+// D2_01_StatusResponse represents D2-01 Actuator Status Response (cmd 0x04)
+type D2_01_StatusResponse struct {
+	Command     byte   `json:"command"`
+	CommandName string `json:"command_name"`
+	IOChannel   byte   `json:"io_channel"`
+	OutputValue byte   `json:"output_value"` // 0=off, 1-100=%, 127=not valid
+	IsOn        bool   `json:"is_on"`
+}
+
 // ParseVLDTelegram parses a VLD (D2) telegram
 func ParseVLDTelegram(data []byte, senderID string) (*VLDData, error) {
 	if len(data) < 2 {
@@ -89,11 +98,36 @@ func parseD2_01(data []byte) (any, error) {
 	cmd := data[0] & 0x0F
 
 	switch cmd {
+	case D2_01_CMD_ACTUATOR_STATUS_RESPONSE:
+		return parseD2_01_StatusResponse(data)
 	case D2_01_CMD_ACTUATOR_MEASUREMENT_RESPONSE:
 		return parseD2_01_MeasurementResponse(data)
 	default:
 		return nil, fmt.Errorf("unknown D2-01 command: 0x%02X", cmd)
 	}
+}
+
+// parseD2_01_StatusResponse parses command 0x04
+func parseD2_01_StatusResponse(data []byte) (*D2_01_StatusResponse, error) {
+	// Format:
+	// Byte 0: .... CCCC = Command (0x04)
+	// Byte 1: ...C CCCC = I/O Channel (bits [4:0])
+	// Byte 2: Output Value (0=off, 1-100=%, 127=not valid)
+	if len(data) < 3 {
+		return nil, fmt.Errorf("D2-01 status response too short: %d bytes", len(data))
+	}
+
+	cmd := data[0] & 0x0F
+	ioChannel := data[1] & 0x1F
+	outputValue := data[2]
+
+	return &D2_01_StatusResponse{
+		Command:     cmd,
+		CommandName: "Actuator Status Response",
+		IOChannel:   ioChannel,
+		OutputValue: outputValue,
+		IsOn:        outputValue > 0 && outputValue != 127,
+	}, nil
 }
 
 // parseD2_01_MeasurementResponse parses command 0x07

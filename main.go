@@ -87,6 +87,15 @@ func main() {
 						log.Printf("Failed to publish measurement: %v", err)
 					}
 				}
+
+				if status, ok := vld.Parsed.(*enocean.D2_01_StatusResponse); ok {
+					log.Printf("D2-01 Status: Channel=%d, OutputValue=%d, IsOn=%v",
+						status.IOChannel, status.OutputValue, status.IsOn)
+
+					if err := mqttClient.PublishDeviceState(senderID, status); err != nil {
+						log.Printf("Failed to publish device state: %v", err)
+					}
+				}
 			}
 		}
 
