@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"enocean-mqtt/config"
@@ -16,13 +17,15 @@ import (
 
 // Client handles MQTT communication
 type Client struct {
-	host      string
-	port      int
-	clientID  string
-	baseTopic string
-	client    paho.Client
-	onCommand func(topic string, payload []byte)
-	config    *config.Config // Config for device name resolution
+	host          string
+	port          int
+	clientID      string
+	baseTopic     string
+	client        paho.Client
+	onCommand     func(topic string, payload []byte)
+	config        *config.Config       // Config for device name resolution
+	mu            sync.Mutex
+	channelStates map[string]map[byte]byte // senderID → ioChannel → outputValue
 }
 
 // TelegramMessage represents the JSON structure for MQTT messages
@@ -273,6 +276,44 @@ func (c *Client) PublishMeasurement(senderID string, measurement *enocean.D2_01_
 	}
 
 	log.Printf("Published measurement to %s: %d %s", topic, measurement.MeasurementValue, measurement.UnitName)
+	return nil
+}
+
+// PublishDeviceState tracks per-channel output values and publishes a retained
+// combined state topic: "on" if any channel is on, "off" if all channels are off.
+// Topic: enocean/device/{name}/state
+func (c *Client) PublishDeviceState(senderID string, status *enocean.D2_01_StatusResponse) error {
+	c.mu.Lock()
+	if c.channelStates == nil {
+		c.channelStates = make(map[string]map[byte]byte)
+	}
+	if c.channelStates[senderID] == nil {
+		c.channelStates[senderID] = make(map[byte]byte)
+	}
+	c.channelStates[senderID][status.IOChannel] = status.OutputValue
+
+	anyOn := false
+	for _, val := range c.channelStates[senderID] {
+		if val > 0 && val != 127 {
+			anyOn = true
+			break
+		}
+	}
+	c.mu.Unlock()
+
+	state := "off"
+	if anyOn {
+		state = "on"
+	}
+
+	topicName := c.getTopicName(senderID)
+	topic := fmt.Sprintf("%s/device/%s/state", c.baseTopic, topicName)
+	token := c.client.Publish(topic, 1, true, state) // retained
+	if token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to publish device state: %w", token.Error())
+	}
+
+	log.Printf("Published device state to %s: %s (channel %d = %d)", topic, state, status.IOChannel, status.OutputValue)
 	return nil
 }
 
