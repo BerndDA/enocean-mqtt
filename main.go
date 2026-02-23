@@ -211,27 +211,26 @@ func main() {
 		}
 
 		// Handle device commands by friendly name: enocean/cmd/{device_name}
+		// Payload: "on" or "off" (simple string, not JSON)
 		// Extract device name from topic (last segment after /cmd/)
 		if strings.Contains(topic, "/cmd/") {
 			parts := strings.Split(topic, "/cmd/")
 			if len(parts) == 2 {
 				deviceName := parts[1]
 				
-				// Look up device by friendly name
+				// Look up device by friendly name or ID
 				deviceID, device := cfg.GetDeviceByName(deviceName)
+				if device == nil {
+					// Try as device ID directly
+					deviceID = deviceName
+					device = cfg.GetDevice(deviceID)
+				}
+				
 				if device != nil {
-					var cmd ActuatorCommand
-					if err := json.Unmarshal(payload, &cmd); err != nil {
-						log.Printf("Invalid command JSON for %s: %v", deviceName, err)
-						mqttClient.PublishEvent(deviceName, "error", "Invalid JSON: "+err.Error())
-						return
-					}
-
-					// Use sender_id from config if not provided in command
-					senderID := cmd.SenderID
-					if senderID == "" {
-						senderID = device.SenderID
-					}
+					// Parse simple on/off payload
+					state := strings.ToLower(strings.TrimSpace(string(payload)))
+					
+					senderID := device.SenderID
 					if senderID == "" {
 						log.Printf("No sender_id configured for device %s", deviceName)
 						mqttClient.PublishEvent(deviceName, "error", "No sender_id configured")
@@ -240,47 +239,41 @@ func main() {
 
 					// Determine action based on device type
 					switch device.Type {
-					case "switch", "actuator", "light":
-						// RPS F6 rocker switch
-						on := strings.ToLower(cmd.State) == "on"
+					case "switch", "actuator", "light", "":
+						// RPS F6 rocker switch (default)
+						on := state == "on"
 						if err := enoceanClient.SendEltakoSwitch(senderID, on); err != nil {
 							log.Printf("Failed to send command to %s: %v", deviceName, err)
 							mqttClient.PublishEvent(deviceName, "error", err.Error())
 						} else {
-							log.Printf("Sent %s command to %s (sender: %s)", cmd.State, deviceName, senderID)
-							mqttClient.PublishEvent(deviceName, "success", "Command sent: "+cmd.State)
+							log.Printf("Sent %s command to %s (sender: %s)", state, deviceName, senderID)
+							mqttClient.PublishEvent(deviceName, "success", "Command sent: "+state)
 						}
 					case "dimmer":
 						// D2-01 VLD dimmer
 						var outputValue byte
-						switch strings.ToLower(cmd.State) {
+						switch state {
 						case "on":
 							outputValue = 101
 						case "off":
 							outputValue = 0
-						case "dim":
-							outputValue = cmd.Value
 						default:
-							outputValue = cmd.Value
+							// Try to parse as number for dimming
+							log.Printf("Unknown dimmer state: %s", state)
+							return
 						}
-						if err := enoceanClient.SendActuatorOutput(senderID, deviceID, cmd.Channel, outputValue); err != nil {
+						if err := enoceanClient.SendActuatorOutput(senderID, deviceID, 0, outputValue); err != nil {
 							log.Printf("Failed to send dimmer command to %s: %v", deviceName, err)
 							mqttClient.PublishEvent(deviceName, "error", err.Error())
 						} else {
 							log.Printf("Sent dimmer command to %s: value=%d", deviceName, outputValue)
 							mqttClient.PublishEvent(deviceName, "success", "Dimmer command sent")
 						}
-					default:
-						// Default to RPS switch
-						on := strings.ToLower(cmd.State) == "on"
-						if err := enoceanClient.SendEltakoSwitch(senderID, on); err != nil {
-							log.Printf("Failed to send command to %s: %v", deviceName, err)
-							mqttClient.PublishEvent(deviceName, "error", err.Error())
-						} else {
-							log.Printf("Sent %s command to %s (sender: %s)", cmd.State, deviceName, senderID)
-							mqttClient.PublishEvent(deviceName, "success", "Command sent: "+cmd.State)
-						}
 					}
+					return
+				} else {
+					log.Printf("Unknown device: %s", deviceName)
+					mqttClient.PublishEvent(deviceName, "error", "Unknown device")
 					return
 				}
 			}

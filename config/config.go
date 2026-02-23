@@ -52,6 +52,15 @@ func (c *Config) GetDeviceByName(name string) (string, *Device) {
 	return "", nil
 }
 
+// GetDevice returns a device by its ID
+func (c *Config) GetDevice(deviceID string) *Device {
+	normalizedID := strings.ToUpper(deviceID)
+	if device, ok := c.Devices[normalizedID]; ok {
+		return &device
+	}
+	return nil
+}
+
 // IsOwnSenderID checks if a sender ID is one of our configured transmitter IDs
 // These are echoes from our own transmissions and should typically be ignored
 func (c *Config) IsOwnSenderID(senderID string) bool {
