@@ -112,14 +112,15 @@ func parseD2_01_StatusResponse(data []byte) (*D2_01_StatusResponse, error) {
 	// Format:
 	// Byte 0: .... CCCC = Command (0x04)
 	// Byte 1: ...C CCCC = I/O Channel (bits [4:0])
-	// Byte 2: Output Value (0=off, 1-100=%, 127=not valid)
+	// Byte 2: LOOO OOOO = L=Local Control flag (bit 7), Output Value (bits 6:0, 0=off, 1-100=%, 127=not valid)
 	if len(data) < 3 {
 		return nil, fmt.Errorf("D2-01 status response too short: %d bytes", len(data))
 	}
 
 	cmd := data[0] & 0x0F
 	ioChannel := data[1] & 0x1F
-	outputValue := data[2]
+	// Bit 7 is Local Control flag, actual output value is in lower 7 bits
+	outputValue := data[2] & 0x7F
 
 	return &D2_01_StatusResponse{
 		Command:     cmd,

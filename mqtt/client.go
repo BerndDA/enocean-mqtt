@@ -25,7 +25,8 @@ type Client struct {
 	onCommand     func(topic string, payload []byte)
 	config        *config.Config       // Config for device name resolution
 	mu            sync.Mutex
-	channelStates map[string]map[byte]byte // senderID → ioChannel → outputValue
+	channelStates map[string]map[byte]byte     // senderID → ioChannel → outputValue (D2-01)
+	rockerStates  map[string]map[string]bool   // senderID → channel (A/B) → isOn
 }
 
 // TelegramMessage represents the JSON structure for MQTT messages
@@ -43,21 +44,23 @@ type TelegramMessage struct {
 // NewClient creates a new MQTT client (without config, for backwards compatibility)
 func NewClient(host string, port int, clientID, baseTopic string) *Client {
 	return &Client{
-		host:      host,
-		port:      port,
-		clientID:  clientID,
-		baseTopic: baseTopic,
+		host:         host,
+		port:         port,
+		clientID:     clientID,
+		baseTopic:    baseTopic,
+		rockerStates: make(map[string]map[string]bool),
 	}
 }
 
 // NewClientWithConfig creates a new MQTT client with config for device name resolution
 func NewClientWithConfig(host string, port int, clientID, baseTopic string, cfg *config.Config) *Client {
 	return &Client{
-		host:      host,
-		port:      port,
-		clientID:  clientID,
-		baseTopic: baseTopic,
-		config:    cfg,
+		host:         host,
+		port:         port,
+		clientID:     clientID,
+		baseTopic:    baseTopic,
+		config:       cfg,
+		rockerStates: make(map[string]map[string]bool),
 	}
 }
 
@@ -380,6 +383,11 @@ func (c *Client) PublishRockerSwitch(rps *enocean.RPSData) error {
 		return err
 	}
 
+	// Update rocker state on button press (DOWN=on, UP=off)
+	if rps.EnergyBow {
+		c.updateRockerState(rps.SenderID, rps.Action1Channel, rps.Action1Direction == "DOWN")
+	}
+
 	// Publish second action if valid (both buttons pressed simultaneously)
 	if rps.Action2Valid {
 		msg2 := RockerSwitchMessage{
@@ -394,9 +402,61 @@ func (c *Client) PublishRockerSwitch(rps *enocean.RPSData) error {
 		if err := c.publishChannelMessage(rps.SenderID, rps.Action2Channel, msg2); err != nil {
 			return err
 		}
+
+		// Update second channel state on button press
+		if rps.EnergyBow {
+			c.updateRockerState(rps.SenderID, rps.Action2Channel, rps.Action2Direction == "DOWN")
+		}
+	}
+
+	// Publish combined state (retained) if button was pressed
+	if rps.EnergyBow {
+		c.publishRockerCombinedState(rps.SenderID)
 	}
 
 	return nil
+}
+
+// updateRockerState updates the internal state for a rocker switch channel
+func (c *Client) updateRockerState(senderID, channel string, isOn bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.rockerStates[senderID] == nil {
+		c.rockerStates[senderID] = make(map[string]bool)
+	}
+	c.rockerStates[senderID][channel] = isOn
+}
+
+// publishRockerCombinedState publishes the combined ON/OFF state for a rocker switch
+// State is "on" if at least one channel is on, "off" if all channels are off
+func (c *Client) publishRockerCombinedState(senderID string) {
+	c.mu.Lock()
+	channels := c.rockerStates[senderID]
+	var isOn bool
+	for _, on := range channels {
+		if on {
+			isOn = true
+			break
+		}
+	}
+	c.mu.Unlock()
+
+	state := "off"
+	if isOn {
+		state = "on"
+	}
+
+	topicName := c.getTopicName(senderID)
+	topic := fmt.Sprintf("%s/device/%s/state", c.baseTopic, topicName)
+
+	// Publish with retain flag so state persists
+	token := c.client.Publish(topic, 1, true, state)
+	if token.Wait() && token.Error() != nil {
+		log.Printf("Failed to publish rocker state: %v", token.Error())
+		return
+	}
+	log.Printf("Published state to %s: %s", topic, state)
 }
 
 // publishChannelMessage publishes a single channel message

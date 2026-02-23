@@ -125,8 +125,14 @@ python tools/enodump.py --host 192.168.1.100 --port 2001 -b | wireshark -k -i -
 |-------|-------------|
 | `enocean/bridge/status` | Bridge status: "online" / "offline" (retained, LWT) |
 | `enocean/telegram` | All received EnOcean telegrams |
-| `enocean/device/{name}/switch/{button}` | RPS rocker events (e.g., `kitchen_light/switch/A`) |
+| `enocean/device/{name}/switch/{channel}` | RPS rocker events (e.g., `kitchen_light/switch/A`) |
+| `enocean/device/{name}/state` | Combined device state: "on" / "off" (retained) |
+| `enocean/device/{name}/measurement` | D2-01 actuator measurements (energy/power) |
 | `enocean/device/{id}` | Device telegrams (fallback if no name configured) |
+
+**State Topic Logic:**
+- **Rocker switches (F6)**: "on" if at least one channel was last pressed DOWN, "off" if all channels pressed UP
+- **D2-01 actuators**: "on" if output value > 0, "off" otherwise
 
 ### Command Topics
 
