@@ -217,7 +217,7 @@ func main() {
 			parts := strings.Split(topic, "/cmd/")
 			if len(parts) == 2 {
 				deviceName := parts[1]
-				
+
 				// Look up device by friendly name or ID
 				deviceID, device := cfg.GetDeviceByName(deviceName)
 				if device == nil {
@@ -225,11 +225,11 @@ func main() {
 					deviceID = deviceName
 					device = cfg.GetDevice(deviceID)
 				}
-				
+
 				if device != nil {
 					// Parse simple on/off payload
 					state := strings.ToLower(strings.TrimSpace(string(payload)))
-					
+
 					senderID := device.SenderID
 					if senderID == "" {
 						log.Printf("No sender_id configured for device %s", deviceName)

@@ -133,6 +133,7 @@ python tools/enodump.py --host 192.168.1.100 --port 2001 -b | wireshark -k -i -
 **State Topic Logic:**
 - **Rocker switches (F6)**: "on" if at least one channel was last pressed DOWN, "off" if all channels pressed UP
 - **D2-01 actuators**: "on" if output value > 0, "off" otherwise
+- **Debounce on `on` → `off`**: state publish waits for either 2 off telegrams or a 1 second timeout (whichever comes first)
 
 ### Command Topics
 

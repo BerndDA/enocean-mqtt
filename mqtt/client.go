@@ -23,10 +23,18 @@ type Client struct {
 	baseTopic     string
 	client        paho.Client
 	onCommand     func(topic string, payload []byte)
-	config        *config.Config       // Config for device name resolution
+	config        *config.Config // Config for device name resolution
 	mu            sync.Mutex
-	channelStates map[string]map[byte]byte     // senderID → ioChannel → outputValue (D2-01)
-	rockerStates  map[string]map[string]bool   // senderID → channel (A/B) → isOn
+	channelStates map[string]map[byte]byte   // senderID → ioChannel → outputValue (D2-01)
+	deviceStates  map[string]bool            // senderID → combined state (true=on, false=off)
+	stateKnown    map[string]bool            // senderID → whether a combined state has been published
+	pendingOff    map[string]int             // senderID → pending off telegram count while debouncing
+	pendingToken  map[string]uint64          // senderID → debounce token for timeout invalidation
+	rockerStates  map[string]map[string]bool // senderID → channel (A/B) → isOn
+	rockerKnown   map[string]bool            // senderID → whether rocker combined state is known
+	rockerOn      map[string]bool            // senderID → rocker combined state (true=on, false=off)
+	rockerPendOff map[string]int             // senderID → pending rocker off telegram count
+	rockerToken   map[string]uint64          // senderID → rocker debounce token for timeout invalidation
 }
 
 // TelegramMessage represents the JSON structure for MQTT messages
@@ -44,23 +52,39 @@ type TelegramMessage struct {
 // NewClient creates a new MQTT client (without config, for backwards compatibility)
 func NewClient(host string, port int, clientID, baseTopic string) *Client {
 	return &Client{
-		host:         host,
-		port:         port,
-		clientID:     clientID,
-		baseTopic:    baseTopic,
-		rockerStates: make(map[string]map[string]bool),
+		host:          host,
+		port:          port,
+		clientID:      clientID,
+		baseTopic:     baseTopic,
+		deviceStates:  make(map[string]bool),
+		stateKnown:    make(map[string]bool),
+		pendingOff:    make(map[string]int),
+		pendingToken:  make(map[string]uint64),
+		rockerStates:  make(map[string]map[string]bool),
+		rockerKnown:   make(map[string]bool),
+		rockerOn:      make(map[string]bool),
+		rockerPendOff: make(map[string]int),
+		rockerToken:   make(map[string]uint64),
 	}
 }
 
 // NewClientWithConfig creates a new MQTT client with config for device name resolution
 func NewClientWithConfig(host string, port int, clientID, baseTopic string, cfg *config.Config) *Client {
 	return &Client{
-		host:         host,
-		port:         port,
-		clientID:     clientID,
-		baseTopic:    baseTopic,
-		config:       cfg,
-		rockerStates: make(map[string]map[string]bool),
+		host:          host,
+		port:          port,
+		clientID:      clientID,
+		baseTopic:     baseTopic,
+		config:        cfg,
+		deviceStates:  make(map[string]bool),
+		stateKnown:    make(map[string]bool),
+		pendingOff:    make(map[string]int),
+		pendingToken:  make(map[string]uint64),
+		rockerStates:  make(map[string]map[string]bool),
+		rockerKnown:   make(map[string]bool),
+		rockerOn:      make(map[string]bool),
+		rockerPendOff: make(map[string]int),
+		rockerToken:   make(map[string]uint64),
 	}
 }
 
@@ -286,6 +310,9 @@ func (c *Client) PublishMeasurement(senderID string, measurement *enocean.D2_01_
 // combined state topic: "on" if any channel is on, "off" if all channels are off.
 // Topic: enocean/device/{name}/state
 func (c *Client) PublishDeviceState(senderID string, status *enocean.D2_01_StatusResponse) error {
+	var stateToPublish string
+	shouldPublish := false
+
 	c.mu.Lock()
 	if c.channelStates == nil {
 		c.channelStates = make(map[string]map[byte]byte)
@@ -302,21 +329,105 @@ func (c *Client) PublishDeviceState(senderID string, status *enocean.D2_01_Statu
 			break
 		}
 	}
+
+	known := c.stateKnown[senderID]
+	isOn := c.deviceStates[senderID]
+
+	if anyOn {
+		c.pendingOff[senderID] = 0
+		c.pendingToken[senderID]++
+
+		if !known || !isOn {
+			c.stateKnown[senderID] = true
+			c.deviceStates[senderID] = true
+			stateToPublish = "on"
+			shouldPublish = true
+		}
+	} else {
+		if !known {
+			c.stateKnown[senderID] = true
+			c.deviceStates[senderID] = false
+			c.pendingOff[senderID] = 0
+			c.pendingToken[senderID]++
+			stateToPublish = "off"
+			shouldPublish = true
+		} else if isOn {
+			c.pendingOff[senderID]++
+
+			if c.pendingOff[senderID] == 1 {
+				token := c.pendingToken[senderID] + 1
+				c.pendingToken[senderID] = token
+
+				time.AfterFunc(1*time.Second, func() {
+					c.handlePendingOffTimeout(senderID, token)
+				})
+			} else if c.pendingOff[senderID] >= 2 {
+				c.pendingOff[senderID] = 0
+				c.pendingToken[senderID]++
+				c.deviceStates[senderID] = false
+				stateToPublish = "off"
+				shouldPublish = true
+			}
+		}
+	}
 	c.mu.Unlock()
 
-	state := "off"
-	if anyOn {
-		state = "on"
+	if !shouldPublish {
+		return nil
 	}
 
+	if err := c.publishDeviceStateValue(senderID, stateToPublish); err != nil {
+		return err
+	}
+
+	log.Printf("Published device state for %s: %s (channel %d = %d)", senderID, stateToPublish, status.IOChannel, status.OutputValue)
+	return nil
+}
+
+func (c *Client) handlePendingOffTimeout(senderID string, token uint64) {
+	shouldPublish := false
+
+	c.mu.Lock()
+	if c.pendingToken[senderID] == token && c.pendingOff[senderID] > 0 {
+		anyOn := false
+		for _, val := range c.channelStates[senderID] {
+			if val > 0 && val != 127 {
+				anyOn = true
+				break
+			}
+		}
+
+		if !anyOn && c.stateKnown[senderID] && c.deviceStates[senderID] {
+			c.pendingOff[senderID] = 0
+			c.pendingToken[senderID]++
+			c.deviceStates[senderID] = false
+			shouldPublish = true
+		} else {
+			c.pendingOff[senderID] = 0
+			c.pendingToken[senderID]++
+		}
+	}
+	c.mu.Unlock()
+
+	if !shouldPublish {
+		return
+	}
+
+	if err := c.publishDeviceStateValue(senderID, "off"); err != nil {
+		log.Printf("Failed to publish debounced off state for %s: %v", senderID, err)
+		return
+	}
+
+	log.Printf("Published debounced device state for %s: off", senderID)
+}
+
+func (c *Client) publishDeviceStateValue(senderID, state string) error {
 	topicName := c.getTopicName(senderID)
 	topic := fmt.Sprintf("%s/device/%s/state", c.baseTopic, topicName)
-	token := c.client.Publish(topic, 1, true, state) // retained
+	token := c.client.Publish(topic, 1, true, state)
 	if token.Wait() && token.Error() != nil {
 		return fmt.Errorf("failed to publish device state: %w", token.Error())
 	}
-
-	log.Printf("Published device state to %s: %s (channel %d = %d)", topic, state, status.IOChannel, status.OutputValue)
 	return nil
 }
 
@@ -367,6 +478,7 @@ type RockerSwitchMessage struct {
 func (c *Client) PublishRockerSwitch(rps *enocean.RPSData) error {
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	deviceName := c.getDeviceName(rps.SenderID)
+	offTelegrams := 0
 
 	// Publish first action
 	msg := RockerSwitchMessage{
@@ -385,6 +497,9 @@ func (c *Client) PublishRockerSwitch(rps *enocean.RPSData) error {
 
 	// Update rocker state on button press (DOWN=on, UP=off)
 	if rps.EnergyBow {
+		if rps.Action1Direction == "UP" {
+			offTelegrams++
+		}
 		c.updateRockerState(rps.SenderID, rps.Action1Channel, rps.Action1Direction == "DOWN")
 	}
 
@@ -405,13 +520,16 @@ func (c *Client) PublishRockerSwitch(rps *enocean.RPSData) error {
 
 		// Update second channel state on button press
 		if rps.EnergyBow {
+			if rps.Action2Direction == "UP" {
+				offTelegrams++
+			}
 			c.updateRockerState(rps.SenderID, rps.Action2Channel, rps.Action2Direction == "DOWN")
 		}
 	}
 
 	// Publish combined state (retained) if button was pressed
 	if rps.EnergyBow {
-		c.publishRockerCombinedState(rps.SenderID)
+		c.publishRockerCombinedState(rps.SenderID, offTelegrams)
 	}
 
 	return nil
@@ -430,33 +548,146 @@ func (c *Client) updateRockerState(senderID, channel string, isOn bool) {
 
 // publishRockerCombinedState publishes the combined ON/OFF state for a rocker switch
 // State is "on" if at least one channel is on, "off" if all channels are off
-func (c *Client) publishRockerCombinedState(senderID string) {
+func (c *Client) publishRockerCombinedState(senderID string, offTelegrams int) {
+	var stateToPublish string
+	shouldPublish := false
+
 	c.mu.Lock()
+	if c.rockerKnown == nil {
+		c.rockerKnown = make(map[string]bool)
+	}
+	if c.rockerOn == nil {
+		c.rockerOn = make(map[string]bool)
+	}
+	if c.rockerPendOff == nil {
+		c.rockerPendOff = make(map[string]int)
+	}
+	if c.rockerToken == nil {
+		c.rockerToken = make(map[string]uint64)
+	}
+
 	channels := c.rockerStates[senderID]
-	var isOn bool
+	isOn := false
 	for _, on := range channels {
 		if on {
 			isOn = true
 			break
 		}
 	}
+
+	known := c.rockerKnown[senderID]
+	currentOn := c.rockerOn[senderID]
+
+	if isOn {
+		if known && currentOn && offTelegrams > 0 {
+			previous := c.rockerPendOff[senderID]
+			c.rockerPendOff[senderID] = previous + offTelegrams
+
+			if previous == 0 {
+				token := c.rockerToken[senderID] + 1
+				c.rockerToken[senderID] = token
+
+				time.AfterFunc(1*time.Second, func() {
+					c.handleRockerPendingOffTimeout(senderID, token)
+				})
+			}
+		} else {
+			c.rockerPendOff[senderID] = 0
+			c.rockerToken[senderID]++
+		}
+
+		if !known || !currentOn {
+			c.rockerKnown[senderID] = true
+			c.rockerOn[senderID] = true
+			stateToPublish = "on"
+			shouldPublish = true
+		}
+	} else {
+		if !known {
+			c.rockerKnown[senderID] = true
+			c.rockerOn[senderID] = false
+			c.rockerPendOff[senderID] = 0
+			c.rockerToken[senderID]++
+			stateToPublish = "off"
+			shouldPublish = true
+		} else if currentOn {
+			previous := c.rockerPendOff[senderID]
+			if offTelegrams > 0 {
+				c.rockerPendOff[senderID] = previous + offTelegrams
+			} else {
+				c.rockerPendOff[senderID] = previous + 1
+			}
+
+			if previous == 0 {
+				token := c.rockerToken[senderID] + 1
+				c.rockerToken[senderID] = token
+
+				time.AfterFunc(1*time.Second, func() {
+					c.handleRockerPendingOffTimeout(senderID, token)
+				})
+			}
+
+			if c.rockerPendOff[senderID] >= 2 {
+				c.rockerPendOff[senderID] = 0
+				c.rockerToken[senderID]++
+				c.rockerOn[senderID] = false
+				stateToPublish = "off"
+				shouldPublish = true
+			}
+		}
+	}
 	c.mu.Unlock()
 
-	state := "off"
-	if isOn {
-		state = "on"
-	}
-
-	topicName := c.getTopicName(senderID)
-	topic := fmt.Sprintf("%s/device/%s/state", c.baseTopic, topicName)
-
-	// Publish with retain flag so state persists
-	token := c.client.Publish(topic, 1, true, state)
-	if token.Wait() && token.Error() != nil {
-		log.Printf("Failed to publish rocker state: %v", token.Error())
+	if !shouldPublish {
 		return
 	}
-	log.Printf("Published state to %s: %s", topic, state)
+
+	if err := c.publishDeviceStateValue(senderID, stateToPublish); err != nil {
+		log.Printf("Failed to publish rocker state for %s: %v", senderID, err)
+		return
+	}
+
+	log.Printf("Published rocker state for %s: %s", senderID, stateToPublish)
+}
+
+func (c *Client) handleRockerPendingOffTimeout(senderID string, token uint64) {
+	shouldPublish := false
+
+	c.mu.Lock()
+	if c.rockerToken[senderID] == token && c.rockerPendOff[senderID] > 0 {
+		isOn := false
+		for _, on := range c.rockerStates[senderID] {
+			if on {
+				isOn = true
+				break
+			}
+		}
+
+		if !isOn && c.rockerKnown[senderID] && c.rockerOn[senderID] {
+			c.rockerPendOff[senderID] = 0
+			c.rockerToken[senderID]++
+			c.rockerOn[senderID] = false
+			shouldPublish = true
+		} else if isOn && c.rockerKnown[senderID] && c.rockerOn[senderID] {
+			// Keep pending off count while still on so a later UP can complete
+			// the 2-telegram debounce path immediately.
+		} else {
+			c.rockerPendOff[senderID] = 0
+			c.rockerToken[senderID]++
+		}
+	}
+	c.mu.Unlock()
+
+	if !shouldPublish {
+		return
+	}
+
+	if err := c.publishDeviceStateValue(senderID, "off"); err != nil {
+		log.Printf("Failed to publish debounced rocker off state for %s: %v", senderID, err)
+		return
+	}
+
+	log.Printf("Published debounced rocker state for %s: off", senderID)
 }
 
 // publishChannelMessage publishes a single channel message
